@@ -351,9 +351,9 @@ function processSelection() {
 }
 
 async function getCustomInstructionsFromPopup() {
-    const { callPopup } = getContext();
+    const { callGenericPopup, POPUP_TYPE } = getContext();
     try {
-        const instructions = await callPopup('Enter custom rewrite instructions:', 'input');
+        const instructions = await callGenericPopup('Enter custom rewrite instructions:', POPUP_TYPE.INPUT);
 
         // Introduce a zero-delay setTimeout to yield to the event loop
         await new Promise(resolve => setTimeout(resolve, 0));
@@ -363,6 +363,25 @@ async function getCustomInstructionsFromPopup() {
         console.error("[Rewrite Extension] Error during custom instruction popup:", error);
         return null;
     } finally {
+    }
+}
+
+async function getManualRewriteFromPopup(initialText) {
+    const { callGenericPopup, POPUP_TYPE } = getContext();
+    try {
+        const editedText = await callGenericPopup('Manual edit selected text:', POPUP_TYPE.INPUT, initialText, {
+            rows: 8,
+            wider: true,
+            allowVerticalScrolling: true,
+        });
+
+        // Yield once to avoid selection/popup timing issues in some browsers.
+        await new Promise(resolve => setTimeout(resolve, 0));
+
+        return editedText;
+    } catch (error) {
+        console.error("[Rewrite Extension] Error during manual rewrite popup:", error);
+        return null;
     }
 }
 
@@ -394,9 +413,20 @@ async function handleMenuItemClick(e) {
                 if (option === 'Delete') {
                     // Pass the initially captured range to handleDeleteSelection
                     await handleDeleteSelection(mesId, swipeId, initialRange);
+                } else if (option === 'Manual') {
+                    const selectionInfo = getSelectedTextInfo(mesId, mesTextElement, initialRange);
+                    if (!selectionInfo) {
+                        console.error("[Rewrite Extension] Failed to get selectionInfo for Manual rewrite!");
+                        return;
+                    }
+
+                    const manualText = await getManualRewriteFromPopup(selectionInfo.selectedRawText);
+                    if (typeof manualText === 'string') {
+                        await handleManualRewrite(mesId, swipeId, selectionInfo, String(manualText));
+                    }
                 } else if (option === 'Custom') {
                     const customInstructions = await getCustomInstructionsFromPopup();
-                    if (customInstructions !== null && customInstructions.trim() !== '') { // Proceed only if user entered text and didn't cancel
+                    if (typeof customInstructions === 'string' && customInstructions.trim() !== '') { // Proceed only if user entered text and didn't cancel
                         // Get selectionInfo *after* await and *before* handleRewrite
                         // Pass the initially captured range
                         const selectionInfo = getSelectedTextInfo(mesId, mesTextElement, initialRange);
@@ -472,6 +502,7 @@ function createRewriteMenu() {
         { name: 'Shorten', show: extension_settings[extensionName].showShorten },
         { name: 'Expand', show: extension_settings[extensionName].showExpand },
         { name: 'Custom', show: extension_settings[extensionName].showCustom }, 
+        { name: 'Manual', show: true },
         { name: 'Delete', show: extension_settings[extensionName].showDelete }
     ];
     options.forEach(option => {
@@ -488,6 +519,29 @@ function createRewriteMenu() {
 
     document.body.appendChild(rewriteMenu);
     positionMenu();
+}
+
+async function handleManualRewrite(mesId, swipeId, selectionInfo, manualText) {
+    const { fullMessage, rawStartOffset, rawEndOffset, range } = selectionInfo;
+    const mesDiv = document.querySelector(`[mesid="${mesId}"] .mes_text`);
+    if (!mesDiv) {
+        console.error('[Rewrite Extension] Could not find mesDiv in handleManualRewrite.');
+        return;
+    }
+
+    const highlightedNewText = document.createElement('span');
+    highlightedNewText.className = 'animated-highlight';
+    highlightedNewText.textContent = manualText;
+
+    range.deleteContents();
+    range.insertNode(highlightedNewText);
+
+    const highlightDuration = extension_settings[extensionName].highlightDuration;
+    setTimeout(() => removeHighlight(mesDiv, mesId, swipeId), highlightDuration);
+
+    await saveRewrittenText(mesId, swipeId, fullMessage, rawStartOffset, rawEndOffset, manualText, {
+        preserveExactText: true,
+    });
 }
 
 function positionMenu() {
@@ -1427,27 +1481,31 @@ async function handleUndo(event) {
     }
 }
 
-async function saveRewrittenText(mesId, swipeId, fullMessage, startOffset, endOffset, newText) {
+async function saveRewrittenText(mesId, swipeId, fullMessage, startOffset, endOffset, newText, options = {}) {
     const context = getContext();
+    const { preserveExactText = false } = options;
 
-    // Get the prefix and suffix to remove from the settings
-    const removePrefix = extension_settings[extensionName].removePrefix || '';
-    const removeSuffix = extension_settings[extensionName].removeSuffix || '';
+    let processedText = newText;
 
-    // Remove prefix if present
-    if (removePrefix && newText.startsWith(removePrefix)) {
-        newText = newText.slice(removePrefix.length);
-    }
+    if (!preserveExactText) {
+        // Get the prefix and suffix to remove from the settings
+        const removePrefix = extension_settings[extensionName].removePrefix || '';
+        const removeSuffix = extension_settings[extensionName].removeSuffix || '';
 
-    // Remove suffix if present
-    if (removeSuffix && newText.endsWith(removeSuffix)) {
-        newText = newText.slice(0, -removeSuffix.length);
-    }
+        // Remove prefix if present
+        if (removePrefix && processedText.startsWith(removePrefix)) {
+            processedText = processedText.slice(removePrefix.length);
+        }
 
-    // Apply AI Output regex scripts if setting is enabled
-    let processedText = newText; // Default to original newText
-    if (extension_settings[extensionName].applyRegexOnRewrite) {
-        processedText = getRegexedString(newText, regex_placement.AI_OUTPUT);
+        // Remove suffix if present
+        if (removeSuffix && processedText.endsWith(removeSuffix)) {
+            processedText = processedText.slice(0, -removeSuffix.length);
+        }
+
+        // Apply AI Output regex scripts if setting is enabled
+        if (extension_settings[extensionName].applyRegexOnRewrite) {
+            processedText = getRegexedString(processedText, regex_placement.AI_OUTPUT);
+        }
     }
 
     // Create the new message with the rewritten and potentially processed section
