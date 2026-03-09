@@ -741,11 +741,28 @@ function getTextOffset(parent, node) {
     );
 
     let offset = 0;
-    while (treeWalker.nextNode() !== node) {
-        offset += treeWalker.currentNode.length;
+    let currentNode;
+    while ((currentNode = treeWalker.nextNode())) {
+        if (currentNode === node) {
+            return offset;
+        }
+        offset += currentNode.textContent?.length || 0;
     }
 
     return offset;
+}
+
+function getFormattedTextOffset(parent, targetRange, isEnd) {
+    const offsetRange = document.createRange();
+    offsetRange.selectNodeContents(parent);
+
+    if (isEnd) {
+        offsetRange.setEnd(targetRange.endContainer, targetRange.endOffset);
+    } else {
+        offsetRange.setEnd(targetRange.startContainer, targetRange.startOffset);
+    }
+
+    return offsetRange.toString().length;
 }
 
 // Modify signature to accept the captured range
@@ -762,9 +779,19 @@ function getSelectedTextInfo(mesId, mesDiv, range) {
     // Create a mapping between raw and formatted text
     const mapping = createTextMapping(fullMessage, formattedMessage);
 
-    // Calculate the start and end offsets relative to the formatted text content
-    const startOffset = getTextOffset(mesDiv, range.startContainer) + range.startOffset;
-    const endOffset = getTextOffset(mesDiv, range.endContainer) + range.endOffset;
+    // Calculate offsets via Range text length. This is robust for element-node
+    // endpoints produced by double/triple-click selection.
+    let startOffset;
+    let endOffset;
+
+    try {
+        startOffset = getFormattedTextOffset(mesDiv, range, false);
+        endOffset = getFormattedTextOffset(mesDiv, range, true);
+    } catch (error) {
+        // Fallback for unusual detached/invalid ranges.
+        startOffset = getTextOffset(mesDiv, range.startContainer) + range.startOffset;
+        endOffset = getTextOffset(mesDiv, range.endContainer) + range.endOffset;
+    }
 
     // Map these offsets back to the raw message
     let rawStartOffset = mapping.formattedToRaw(startOffset);
